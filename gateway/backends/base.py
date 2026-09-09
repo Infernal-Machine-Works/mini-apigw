@@ -40,6 +40,16 @@ class BackendResult:
         yield b"data: [DONE]\n\n"
 
 
+class BackendUpstreamError(RuntimeError):
+    """A bounded, safe-to-return HTTP error received from an upstream backend."""
+
+    def __init__(self, status_code: int, body_preview: str) -> None:
+        body_preview = " ".join(str(body_preview).split())[:512] or "Upstream request failed"
+        super().__init__(body_preview)
+        self.status_code = status_code
+        self.body_preview = body_preview
+
+
 class BackendClient:
     """Abstract base class for model providers."""
 
@@ -71,4 +81,4 @@ class BackendClient:
         return await loop.run_in_executor(None, lambda: func(*args, **kwargs))
 
 
-__all__ = ["BackendClient", "BackendResult", "BackendUsage"]
+__all__ = ["BackendClient", "BackendResult", "BackendUpstreamError", "BackendUsage"]

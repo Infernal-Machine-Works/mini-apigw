@@ -179,6 +179,27 @@ Example `backends.json` (mixed OpenAI + Ollama):
 }
 ```
 
+### Optional OpenAI-compatible request cleanup
+
+Some OpenAI-compatible providers accept a narrower chat payload than OpenAI.
+For an affected backend, these flags are all opt-in and default to `false`:
+
+```json
+{
+  "type": "openai",
+  "name": "aqueduct",
+  "strip_reasoning_effort": true,
+  "reorder_system_messages_to_front": true,
+  "coalesce_system_messages": true
+}
+```
+
+With all three enabled, `reasoning_effort` is removed and all system messages
+are moved to the front, preserving their order, then joined into one system
+message with blank-line separators. User, assistant, and tool messages—and
+the `tools` definition—are otherwise passed through unchanged. Upstream HTTP
+status errors are returned with the same status and a bounded response preview.
+
 Example `apps.json` (one app, you just declare them one after each other), the API keys are threatened
 transparent, you can use any string as Bearer token, it just has to be unique; the app ID is used in filemanes
 so you might not want to use special characters:

@@ -61,6 +61,9 @@ def test_load_backends_config(tmp_path: Path):
                     "reorder_system_messages_to_front": True,
                     "coalesce_system_messages": True,
                 },
+                "strip_reasoning_effort": True,
+                "reorder_system_messages_to_front": True,
+                "coalesce_system_messages": True,
             }
         ]
     }
@@ -71,6 +74,9 @@ def test_load_backends_config(tmp_path: Path):
     assert cfg.backends[0].supports.chat == ["gpt-4"]
     assert cfg.backends[0].responses_shim.reorder_system_messages_to_front is True
     assert cfg.backends[0].responses_shim.coalesce_system_messages is True
+    assert cfg.backends[0].strip_reasoning_effort is True
+    assert cfg.backends[0].reorder_system_messages_to_front is True
+    assert cfg.backends[0].coalesce_system_messages is True
 
 
 def test_load_apps_config_trace_options(tmp_path: Path):

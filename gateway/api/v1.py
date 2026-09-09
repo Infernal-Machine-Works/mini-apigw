@@ -17,7 +17,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from ..accounting import AccountingRecord
 from ..auth import AuthError
-from ..backends.base import BackendResult, BackendUsage
+from ..backends.base import BackendResult, BackendUpstreamError, BackendUsage
 from ..runtime import GatewayRuntime
 from ..trace import TracePayload
 
@@ -67,9 +67,12 @@ async def chat_completions(
 
     stream = bool(payload.get("stream", False))
     request_id = f"chatcmpl-{uuid.uuid4().hex}"
-    result, record, backend = await runtime.execute_operation(
-        operation="chat", model=model, payload=payload, stream=stream
-    )
+    try:
+        result, record, backend = await runtime.execute_operation(
+            operation="chat", model=model, payload=payload, stream=stream
+        )
+    except BackendUpstreamError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.body_preview) from exc
 
     if stream:
         if isinstance(result, BackendResult) and hasattr(result, "as_sse"):

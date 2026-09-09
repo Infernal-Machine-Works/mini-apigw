@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 
 from gateway.accounting import AccountingRecord
 from gateway.api import v1
-from gateway.backends.base import BackendResult, BackendUsage
+from gateway.backends.base import BackendResult, BackendUpstreamError, BackendUsage
 
 
 class DummyRuntime:
@@ -77,6 +77,23 @@ def test_responses_proxy_returns_backend_payload():
     assert runtime.last_operation == "responses"
     assert runtime.last_payload["model"] == "gpt-4o-mini"
     assert runtime.recorded[1] == "app-test"
+
+
+def test_chat_proxy_preserves_upstream_http_400_with_bounded_safe_preview():
+    class FailingRuntime(DummyRuntime):
+        async def execute_operation(self, **kwargs):
+            raise BackendUpstreamError(400, "invalid reasoning_effort " + ("x" * 1000))
+
+    with create_test_app(FailingRuntime()) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": "Bearer test-key"},
+            json={"model": "qwen", "messages": [{"role": "user", "content": "hello"}]},
+        )
+
+    assert response.status_code == 400
+    assert response.json()["detail"].startswith("invalid reasoning_effort")
+    assert len(response.json()["detail"]) <= 512
 
 
 def test_responses_stream_emits_valid_sse_newlines():
