@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, AsyncIterator, Dict
 import asyncio
 import json
+import httpx
 
 from openai import OpenAI
 
@@ -13,7 +14,27 @@ class OpenAIBackend(BackendClient):
         super().__init__(definition)
         if not definition.api_key:
             raise ValueError("OpenAI backend requires api_key")
-        self._client = OpenAI(api_key=definition.api_key, base_url=definition.base_url)
+        client_kwargs = {
+            "api_key": definition.api_key,
+            "base_url": definition.base_url,
+        }
+        if definition.request_timeout_s is not None:
+            client_kwargs["timeout"] = definition.request_timeout_s
+            long_timeout_client = httpx.Client(
+                timeout=httpx.Timeout(
+                    timeout=definition.request_timeout_s,
+                    connect=definition.request_timeout_s,
+                    read=definition.request_timeout_s,
+                    write=definition.request_timeout_s,
+                    pool=definition.request_timeout_s,
+                ),
+                headers=dict(definition.extra_headers or {}) or None,
+            )
+            client_kwargs["max_retries"] = 0
+            client_kwargs["http_client"] = long_timeout_client
+        if definition.extra_headers:
+            client_kwargs["default_headers"] = dict(definition.extra_headers)
+        self._client = OpenAI(**client_kwargs)
 
     async def chat(self, model: str, payload: Dict[str, Any], stream: bool = False):
         request_payload = dict(payload)

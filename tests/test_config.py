@@ -54,7 +54,13 @@ def test_load_backends_config(tmp_path: Path):
                 "base_url": "https://api.openai.com/v1",
                 "api_key": "sk-key",
                 "concurrency": 2,
-                "supports": {"chat": ["gpt-4"]}
+                "supports": {"chat": ["gpt-4"]},
+                "responses_shim": {
+                    "enabled": True,
+                    "operation": "chat",
+                    "reorder_system_messages_to_front": True,
+                    "coalesce_system_messages": True,
+                },
             }
         ]
     }
@@ -63,6 +69,8 @@ def test_load_backends_config(tmp_path: Path):
     cfg = load_backends_config(path)
     assert cfg.backends[0].name == "openai-primary"
     assert cfg.backends[0].supports.chat == ["gpt-4"]
+    assert cfg.backends[0].responses_shim.reorder_system_messages_to_front is True
+    assert cfg.backends[0].responses_shim.coalesce_system_messages is True
 
 
 def test_load_apps_config_trace_options(tmp_path: Path):

@@ -123,6 +123,26 @@ def test_responses_stream_emits_valid_sse_newlines():
     assert chunks[-1] == b"data: [DONE]\n\n"
 
 
+def test_sse_keepalive_is_emitted_before_a_delayed_chunk():
+    async def source():
+        import asyncio
+
+        await asyncio.sleep(0.01)
+        yield b"data: payload\n\n"
+
+    async def collect() -> list[bytes]:
+        chunks: list[bytes] = []
+        async for chunk in v1._with_sse_keepalive(source(), interval_s=0.001):
+            chunks.append(chunk)
+        return chunks
+
+    import asyncio
+
+    chunks = asyncio.run(collect())
+    assert b": keep-alive\n\n" in chunks
+    assert chunks[-1] == b"data: payload\n\n"
+
+
 def test_responses_stream_prefers_backend_usage_over_zero_usage_in_body():
     result = BackendResult(
         body={

@@ -5,9 +5,11 @@
 """
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 import uuid
+from contextlib import suppress
 from typing import Any, AsyncIterator, Dict, Iterable, List, Optional, Sequence
 
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Request
@@ -20,6 +22,8 @@ from ..runtime import GatewayRuntime
 from ..trace import TracePayload
 
 router = APIRouter(prefix="/v1")
+_SSE_KEEPALIVE_INTERVAL_S = 15.0
+_SSE_KEEPALIVE_CHUNK = b": keep-alive\n\n"
 
 
 async def get_runtime(request: Request) -> GatewayRuntime:
@@ -79,7 +83,7 @@ async def chat_completions(
 
         async def iterator():
             try:
-                async for chunk in source_iter:
+                async for chunk in _with_sse_keepalive(source_iter):
                     collector.feed(chunk)
                     yield chunk
             finally:
@@ -165,7 +169,7 @@ async def responses_endpoint(
 
         async def iterator():
             try:
-                async for chunk in source_iter:
+                async for chunk in _with_sse_keepalive(source_iter):
                     collector.feed(chunk)
                     yield chunk
             finally:
@@ -744,6 +748,31 @@ def _responses_result_as_sse(result: BackendResult) -> AsyncIterator[bytes]:
         yield b"data: [DONE]\n\n"
 
     return _generator()
+
+
+async def _with_sse_keepalive(
+    source_iter: AsyncIterator[bytes],
+    interval_s: float = _SSE_KEEPALIVE_INTERVAL_S,
+) -> AsyncIterator[bytes]:
+    iterator = source_iter.__aiter__()
+    pending: asyncio.Task[bytes] | None = asyncio.create_task(iterator.__anext__())
+    try:
+        while pending is not None:
+            done, _ = await asyncio.wait({pending}, timeout=interval_s)
+            if not done:
+                yield _SSE_KEEPALIVE_CHUNK
+                continue
+            try:
+                chunk = pending.result()
+            except StopAsyncIteration:
+                break
+            pending = asyncio.create_task(iterator.__anext__())
+            yield chunk
+    finally:
+        if pending is not None and not pending.done():
+            pending.cancel()
+            with suppress(asyncio.CancelledError, StopAsyncIteration):
+                await pending
 
 def _extract_sse_payloads(chunk: bytes) -> Iterable[Optional[Dict[str, Any]]]:
     text = chunk.decode("utf-8", errors="ignore")
