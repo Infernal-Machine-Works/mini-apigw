@@ -205,6 +205,7 @@ class BackendDefinition:
     request_timeout_s: Optional[float] = None
     extra_headers: Mapping[str, str] = field(default_factory=dict)
     auto_models: bool = False
+    ollama_tool_call_parser: str = "auto"
     strip_reasoning_effort: bool = False
     reorder_system_messages_to_front: bool = False
     coalesce_system_messages: bool = False
@@ -379,6 +380,9 @@ def _load_backend_definition(raw: Mapping[str, Any]) -> BackendDefinition:
     supports = _load_backend_supports(_load_mapping(raw.get("supports"), "supports"))
     cost = _load_backend_cost(_load_mapping(raw.get("cost"), "cost"))
     extra_headers = dict(_load_mapping(raw.get("extra_headers"), "extra_headers"))
+    ollama_parser = raw.get("ollama_tool_call_parser", "auto")
+    if ollama_parser not in ("auto", "native", "qwen_xml"):
+        raise ConfigError("ollama_tool_call_parser must be auto, native, or qwen_xml")
 
     return BackendDefinition(
         type=str(_expect(dict(raw), "type", "backend")),
@@ -392,6 +396,7 @@ def _load_backend_definition(raw: Mapping[str, Any]) -> BackendDefinition:
         request_timeout_s=float(raw["request_timeout_s"]) if raw.get("request_timeout_s") is not None else None,
         extra_headers=extra_headers,
         auto_models=bool(raw.get("auto_models", False)),
+        ollama_tool_call_parser=ollama_parser,
         strip_reasoning_effort=bool(raw.get("strip_reasoning_effort", False)),
         reorder_system_messages_to_front=bool(raw.get("reorder_system_messages_to_front", False)),
         coalesce_system_messages=bool(raw.get("coalesce_system_messages", False)),

@@ -10,6 +10,7 @@ import httpx
 from ollama import Client, RequestError, ResponseError
 
 from .base import BackendClient, BackendResult, BackendUpstreamError, BackendUsage
+from .ollama_xml import parse_qwen_response
 
 
 log = logging.getLogger(__name__)
@@ -49,28 +50,84 @@ class OllamaBackend(BackendClient):
             base_url=self.definition.base_url,
             timeout=self.definition.request_timeout_s,
         ) as client:
-            response = await client.post("/api/chat", json=request_payload)
-        if response.is_error:
-            try:
-                error_body = response.json()
-            except ValueError:
-                error_body = None
-            error = error_body.get("error") if isinstance(error_body, dict) else None
-            error = BackendUpstreamError(response.status_code, error or response.text)
-            # Ollama returns only a parser error, not the malformed model output.
-            # Preserve a bounded diagnostic without logging conversation content.
-            log.warning(
-                "Ollama chat failed backend=%s model=%s status=%s detail=%s",
-                self.definition.name, model, error.status_code, error.body_preview,
-            )
-            raise error
-        body = response.json()
+            mode = self.definition.ollama_tool_call_parser
+            if mode == "qwen_xml" and request_payload.get("tools"):
+                body = await self._raw_xml_chat(client, request_payload)
+            else:
+                try:
+                    body = await self._post_json(client, "/api/chat", request_payload)
+                except BackendUpstreamError as exc:
+                    if (mode != "auto" or not request_payload.get("tools")
+                            or exc.status_code != 500
+                            or "xml syntax error" not in exc.body_preview.lower()):
+                        raise
+                    # Ollama discarded this output. One raw generation lets the
+                    # gateway repair XML locally, without changing the prompt.
+                    log.warning("Ollama XML recovery backend=%s model=%s",
+                                self.definition.name, model)
+                    body = await self._raw_xml_chat(client, request_payload)
         body = self._coerce_chat_response(body)
         usage = BackendUsage(
             input_tokens=body.get("prompt_eval_count"),
             output_tokens=body.get("eval_count"),
         )
         return BackendResult(body=body, usage=usage)
+
+    async def _post_json(self, client, endpoint: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        response = await client.post(endpoint, json=payload)
+        try:
+            body = response.json()
+        except ValueError:
+            body = None
+        detail = body.get("error") if isinstance(body, dict) else None
+        if response.is_error or detail:
+            error = BackendUpstreamError(
+                response.status_code if response.is_error else 500, detail or response.text,
+            )
+            log.warning(
+                "Ollama chat failed backend=%s model=%s status=%s detail=%s",
+                self.definition.name, payload["model"], error.status_code, error.body_preview,
+            )
+            raise error
+        if not isinstance(body, dict):
+            raise BackendUpstreamError(502, "Ollama returned an invalid JSON response")
+        if not payload.get("_debug_render_only") and body.get("done") is not True:
+            # Ollama can return HTTP 200 with a partial message when its runner
+            # aborts (for example on repeated tokens). No answer or tool call
+            # from that partial generation may be presented as completed.
+            log.warning(
+                "Ollama incomplete response backend=%s model=%s endpoint=%s done=%r",
+                self.definition.name, payload["model"], endpoint, body.get("done"),
+            )
+            raise BackendUpstreamError(
+                502, "Ollama ended generation without a completion marker (done=true); "
+                "the partial response was discarded",
+            )
+        return body
+
+    async def _raw_xml_chat(self, client, payload: Dict[str, Any]) -> Dict[str, Any]:
+        if any(message.get("images") for message in payload["messages"]):
+            raise BackendUpstreamError(502, "Ollama XML repair currently requires text-only messages")
+        # Use Ollama's own renderer: includes model system text, tools, thinking
+        # prefill, and complete conversation formatting. Never emulate templates.
+        rendered = await self._post_json(client, "/api/chat", {**payload, "_debug_render_only": True})
+        debug = rendered.get("_debug_info")
+        if not isinstance(debug, dict):
+            raise BackendUpstreamError(502, "Ollama XML repair requires _debug_render_only support")
+        prompt = debug.get("rendered_template")
+        if (not isinstance(prompt, str) or "<function=" not in prompt
+                or "<parameter=" not in prompt or debug.get("image_count", 0)):
+            raise BackendUpstreamError(502, "Ollama XML repair requires a text-only Qwen XML tool template")
+        request = {key: payload[key] for key in ("model", "options", "keep_alive", "format", "think")
+                   if key in payload}
+        request.update(prompt=prompt, raw=True, stream=False)
+        body = await self._post_json(client, "/api/generate", request)
+        message = parse_qwen_response(body, payload["tools"], prompt)
+        # Raw XML is converted to the same native message shape as /api/chat.
+        body.pop("response", None)
+        body.pop("thinking", None)
+        body["message"] = message
+        return body
 
     async def completions(self, model: str, payload: Dict[str, Any]) -> BackendResult:
         request_payload = self._prepare_generate_payload(model, payload)

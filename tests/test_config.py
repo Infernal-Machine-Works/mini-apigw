@@ -79,6 +79,21 @@ def test_load_backends_config(tmp_path: Path):
     assert cfg.backends[0].coalesce_system_messages is True
 
 
+@pytest.mark.parametrize("mode", ["auto", "native", "qwen_xml"])
+def test_ollama_tool_parser_config(tmp_path, mode):
+    path = tmp_path / "backends.json"
+    backend = {"type": "ollama", "name": "local", "base_url": "http://localhost:11434"}
+    path.write_text(json.dumps({"backends": [backend]}))
+    assert load_backends_config(path).backends[0].ollama_tool_call_parser == "auto"
+    backend["ollama_tool_call_parser"] = mode
+    path.write_text(json.dumps({"backends": [backend]}))
+    assert load_backends_config(path).backends[0].ollama_tool_call_parser == mode
+    backend["ollama_tool_call_parser"] = "unknown"
+    path.write_text(json.dumps({"backends": [backend]}))
+    with pytest.raises(ConfigError, match="ollama_tool_call_parser"):
+        load_backends_config(path)
+
+
 def test_load_apps_config_trace_options(tmp_path: Path):
     data = {
         "apps": [
