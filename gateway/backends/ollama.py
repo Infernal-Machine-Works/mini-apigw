@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from copy import deepcopy
 from typing import Any, Dict, List, Tuple
 
+import httpx
 from ollama import Client, RequestError, ResponseError
 
-from .base import BackendClient, BackendResult, BackendUsage
+from .base import BackendClient, BackendResult, BackendUpstreamError, BackendUsage
+
+
+log = logging.getLogger(__name__)
 
 
 class OllamaBackend(BackendClient):
@@ -38,25 +43,28 @@ class OllamaBackend(BackendClient):
     async def chat(self, model: str, payload: Dict[str, Any], stream: bool = False):
         request_payload = self._prepare_chat_payload(model, payload, stream)
 
-        def _call():
+        # Send native JSON: older Ollama SDKs silently discard tool_name and
+        # thinking from messages, which corrupts tool-call continuations.
+        async with httpx.AsyncClient(
+            base_url=self.definition.base_url,
+            timeout=self.definition.request_timeout_s,
+        ) as client:
+            response = await client.post("/api/chat", json=request_payload)
+        if response.is_error:
             try:
-                response = self._client.chat(
-                    model=model,
-                    messages=request_payload.get("messages"),
-                    tools=request_payload.get("tools"),
-                    stream=False,
-                    format=request_payload.get("format"),
-                    options=request_payload.get("options"),
-                    keep_alive=request_payload.get("keep_alive"),
-                )
-            except (RequestError, ResponseError) as exc:
-                raise RuntimeError(f"Ollama chat error: {exc}") from exc
-            body = response.model_dump()
-            body.setdefault("message", body.get("message"))
-            body.setdefault("model", response.model)
-            return body
-
-        body = await self._asyncify(_call)
+                error_body = response.json()
+            except ValueError:
+                error_body = None
+            error = error_body.get("error") if isinstance(error_body, dict) else None
+            error = BackendUpstreamError(response.status_code, error or response.text)
+            # Ollama returns only a parser error, not the malformed model output.
+            # Preserve a bounded diagnostic without logging conversation content.
+            log.warning(
+                "Ollama chat failed backend=%s model=%s status=%s detail=%s",
+                self.definition.name, model, error.status_code, error.body_preview,
+            )
+            raise error
+        body = response.json()
         body = self._coerce_chat_response(body)
         usage = BackendUsage(
             input_tokens=body.get("prompt_eval_count"),
@@ -140,48 +148,64 @@ class OllamaBackend(BackendClient):
         request_payload["model"] = model
         request_payload["stream"] = False
 
-        tools = request_payload.get("tools")
-        functions: List[Dict[str, Any]] = []
-        if tools:
-            for tool in tools:
-                if not isinstance(tool, dict):
-                    continue
-                if tool.get("type") != "function":
-                    continue
-                fn = tool.get("function", {})
-                name = fn.get("name")
-                if not name:
-                    continue
-                functions.append(
-                    {
-                        "name": name,
-                        "description": fn.get("description", ""),
-                        "parameters": fn.get("parameters", {}),
-                    }
-                )
-        if functions:
-            request_payload["functions"] = functions
+        if not request_payload.get("tools") and request_payload.get("functions"):
+            request_payload["tools"] = [
+                {"type": "function", "function": function}
+                for function in request_payload["functions"]
+            ]
 
         messages = []
+        call_names: Dict[str, str] = {}
         for original in request_payload.get("messages", []) or []:
             message = deepcopy(original)
             tool_calls = message.pop("tool_calls", None)
-            if tool_calls:
-                call = tool_calls[0]
-                fn = call.get("function", {}) if isinstance(call, dict) else {}
-                name = fn.get("name") or ""
-                arguments = fn.get("arguments") or "{}"
-                if isinstance(arguments, dict):
-                    arguments = json.dumps(arguments)
-                elif not isinstance(arguments, str):
-                    arguments = json.dumps(arguments)
-                message["function_call"] = {"name": name, "arguments": arguments}
-                message["content"] = ""
-            if message.get("role") == "tool":
-                name = message.get("name") or message.get("tool_call_id") or ""
-                message["name"] = name
+            legacy_call = message.pop("function_call", None)
+            if legacy_call is not None:
+                if tool_calls:
+                    raise BackendUpstreamError(400, "Use tool_calls or function_call, not both")
+                tool_calls = [{"type": "function", "function": legacy_call}]
+            if tool_calls is not None:
+                if not isinstance(tool_calls, list):
+                    raise BackendUpstreamError(400, "tool_calls must be an array")
+                native_calls = []
+                for call in tool_calls:
+                    if not isinstance(call, dict) or call.get("type", "function") != "function":
+                        raise BackendUpstreamError(400, "Ollama supports only function tool calls")
+                    function = call.get("function")
+                    if not isinstance(function, dict) or not isinstance(function.get("name"), str) or not function["name"]:
+                        raise BackendUpstreamError(400, "Tool calls require a function name")
+                    arguments = function.get("arguments", {})
+                    if isinstance(arguments, str):
+                        try:
+                            arguments = json.loads(arguments)
+                        except ValueError as exc:
+                            raise BackendUpstreamError(400, "Tool-call arguments must be a JSON object") from exc
+                    if not isinstance(arguments, dict):
+                        raise BackendUpstreamError(400, "Tool-call arguments must be a JSON object")
+                    name = function["name"]
+                    call_id = call.get("id")
+                    if call_id is not None:
+                        if not isinstance(call_id, str) or not call_id:
+                            raise BackendUpstreamError(400, "Tool-call IDs must be nonempty strings")
+                        if call_id in call_names and call_names[call_id] != name:
+                            raise BackendUpstreamError(400, "Tool-call ID refers to conflicting function names")
+                        call_names[call_id] = name
+                    native_calls.append({"function": {"name": name, "arguments": arguments}})
+                message["tool_calls"] = native_calls
+            if message.get("role") in {"tool", "function"}:
+                call_id = message.get("tool_call_id")
+                if call_id is not None and not isinstance(call_id, str):
+                    raise BackendUpstreamError(400, "tool_call_id must be a string")
+                mapped_name = call_names.get(call_id)
+                name = message.get("tool_name") or message.get("name") or mapped_name
+                if not isinstance(name, str) or not name:
+                    raise BackendUpstreamError(400, "Tool result requires a name or a matching tool_call_id")
+                if mapped_name and name != mapped_name:
+                    raise BackendUpstreamError(400, "Tool result name does not match tool_call_id")
                 message["role"] = "tool"
+                message["tool_name"] = name
             message.pop("tool_call_id", None)
+            message.pop("name", None)
             text, images = self._extract_multimodal_content(message.get("content"))
             if images:
                 message["images"] = images
@@ -198,7 +222,12 @@ class OllamaBackend(BackendClient):
             request_payload["format"] = format_value
         else:
             request_payload.pop("format", None)
-        return request_payload
+        # Do not forward OpenAI-only control fields to the native endpoint.
+        return {
+            key: request_payload[key]
+            for key in ("model", "messages", "tools", "stream", "format", "options", "keep_alive", "think")
+            if key in request_payload
+        }
 
     def _prepare_generate_payload(self, model: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         request: Dict[str, Any] = {"model": model, "stream": False}

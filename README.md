@@ -200,6 +200,19 @@ message with blank-line separators. User, assistant, and tool messages—and
 the `tools` definition—are otherwise passed through unchanged. Upstream HTTP
 status errors are returned with the same status and a bounded response preview.
 
+Ollama chat uses native JSON requests so tool-result names and assistant thinking
+survive older Python SDK versions. OpenAI tool-call argument strings are decoded
+into objects; all calls are retained, and result IDs are resolved to Ollama
+`tool_name` values. Legacy `functions`/`function_call` history is also converted.
+Malformed arguments or unresolved tool-result names return HTTP 400.
+
+Ollama HTTP failures (including malformed XML in generated tool calls) preserve
+the upstream status and return a JSON `detail` diagnostic, bounded to 512
+characters. The same bounded diagnostic is logged with the backend and model.
+The gateway does not retry or guess repairs: Ollama's error response does not
+include the raw malformed output. Chat streaming remains buffered, with errors
+returned before SSE starts and successful tool calls marked `tool_calls`.
+
 Example `apps.json` (one app, you just declare them one after each other), the API keys are threatened
 transparent, you can use any string as Bearer token, it just has to be unique; the app ID is used in filemanes
 so you might not want to use special characters:

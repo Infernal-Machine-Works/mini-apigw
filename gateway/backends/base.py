@@ -31,7 +31,7 @@ class BackendResult:
                 {
                     "delta": self.body.get("choices", [{}])[0].get("message", {}),
                     "index": 0,
-                    "finish_reason": "stop",
+                    "finish_reason": self.body.get("choices", [{}])[0].get("finish_reason", "stop"),
                 }
             ],
         }
